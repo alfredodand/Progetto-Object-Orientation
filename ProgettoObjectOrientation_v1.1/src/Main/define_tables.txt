@@ -1,0 +1,233 @@
+
+/* DEFINIZIONE TABELLE */
+
+ CREATE TABLE Insegnanti( 
+    id serial PRIMARY KEY,  
+    nome varchar(20) NOT NULL, 
+    cognome varchar(20) NOT NULL, 
+    datanascita date NOT NULL, 
+    descrizione varchar(200) 
+ );  
+ 
+ CREATE TABLE operatore ( 
+    id_operatore serial PRIMARY KEY, 
+    nome varchar(15) NOT NULL, 
+    cognome varchar(15) NOT NULL,  
+    email varchar(30) NOT NULL, 
+    password varchar(30) NOT NULL, 
+    username varchar(10) NOT NULL 
+);  
+ 
+CREATE domain SessoMF AS char(1) 
+        CHECK (Value = 'M' or Value = 'F');  
+ 
+CREATE TABLE studenti( 
+    matricola char(10) PRIMARY KEY, 
+    nome varchar(20) NOT NULL, 
+    cognome varchar(20) NOT NULL, 
+    sesso SessoMF NOT NULL, 
+    data_nascita date NOT NULL 
+);  
+ 
+CREATE TABLE areaTematica(
+    id_area_tematica serial PRIMARY KEY,
+    nome varchar(50) NOT NULL,
+    CONSTRAINT Area_Tematica_Unica UNIQUE(nome)
+);  
+
+CREATE TABLE corsi ( 
+    id_corsi serial PRIMARY KEY, 
+    nome varchar(50) NOT NULL,
+    descrizione varchar(200),  
+    tasso_minimo_presenze decimal(3, 0) NOT NULL, 
+    numero_partecipanti integer NOT NULL, 
+    numero_lezioni integer NOT NULL, 
+    id_area_tematica integer,  
+    docente integer, 
+    numero_massimo_studenti integer, 
+    CONSTRAINT Fk_Docente FOREIGN KEY (docente) REFERENCES insegnanti (id),  
+    CONSTRAINT percentuale CHECK (tasso_minimo_presenze >= 0 AND  tasso_minimo_presenze <= 100),  
+    CONSTRAINT area_tematica FOREIGN KEY(id_area_tematica) REFERENCES areaTematica(id_area_tematica)
+);   
+ 
+CREATE TABLE iscrizione ( 
+    matricola char(10) NOT NULL, 
+    id_corsi integer NOT NULL, 
+    CONSTRAINT Fk_Matricola FOREIGN KEY (matricola) REFERENCES Studenti ( matricola),  
+    CONSTRAINT Fk_ID_Corsi FOREIGN KEY (id_corsi) REFERENCES Corsi (id_corsi), 
+    CONSTRAINT unica_iscrizione UNIQUE(matricola, id_corsi)
+);  
+
+CREATE TABLE area_per_corsi(
+    id_area_tematica integer NOT NULL,
+    id_corsi integer NOT NULL, 
+    CONSTRAINT Fk_AreaTematica FOREIGN KEY (id_area_tematica) REFERENCES areaTematica (id_area_tematica),  
+    CONSTRAINT Fk_ID_Corsi FOREIGN KEY (id_corsi) REFERENCES Corsi (id_corsi),  
+    CONSTRAINT Unica_Combinazione UNIQUE(id_area_tematica, id_corsi)
+); 
+
+CREATE TABLE lezioni ( 
+    id_lezioni serial PRIMARY KEY, 
+    titolo varchar(100) NOT NULL, 
+    descrizione varchar(200),  
+    durata integer NOT NULL, 
+    data_e_ora_inizio timestamp without time zone, 
+    numero_presenze integer NOT NULL, 
+    id_corso integer, 
+    CONSTRAINT Fk_Corso FOREIGN KEY (id_corso) REFERENCES corsi(id_corsi)  
+);   
+
+ 
+CREATE TABLE presenza ( 
+    matricola char(10),   
+    id_lezione integer, 
+    id_presenza serial PRIMARY KEY, 
+    CONSTRAINT Fk_Matricola FOREIGN KEY (matricola) REFERENCES Studenti(matricola),  
+    CONSTRAINT Fk_ID_lezione FOREIGN KEY(id_lezione) REFERENCES Lezioni(id_lezioni), 
+    CONSTRAINT unica_presenza UNIQUE(matricola, id_lezione) 
+);   
+
+/* DEFINIZIONE VISTE */
+
+CREATE VIEW conta AS (  
+SELECT DISTINCT count(p.matricola) AS num_partecipanti, l.id_lezioni 
+FROM corsi c INNER JOIN lezioni l ON l.id_corso = c.id_corsi INNER JOIN  presenza p ON p.id_lezione = l.id_lezioni 
+GROUP BY l.id_lezioni 
+);  
+
+CREATE VIEW presenze AS (
+SELECT p.matricola, l.id_corso, count(p.matricola) as num_presenze 
+FROM  presenza as p INNER JOIN lezioni as l ON p.id_lezione = l.id_lezioni  
+GROUP BY p.matricola, l.id_corso  
+); 
+
+CREATE VIEW tasso_minimo_presenza(Matricola) AS ( 
+SELECT P.matricola, C.id_corsi 
+FROM presenze as P inner join corsi as C on P.id_corso = C.id_corsi 
+WHERE P.num_presenze >= (C.numero_lezioni * C.tasso_minimo_presenze)/100 
+);   
+
+CREATE VIEW tasso_frequenza(nome_corso, media_presenze, minimo_presenze,  massimo_presenze, riempimento_medio) AS ( 
+SELECT DISTINCT C.nome, avg(num_partecipanti),  min(num_partecipanti),  max(  num_partecipanti),  ((avg(num_partecipanti)/C.numero_partecipanti)*100)  
+FROM corsi as C INNER JOIN lezioni as L ON L.id_corso = C.id_corsi INNER  JOIN presenza as p ON p.id_lezione = L.id_lezioni INNER JOIN conta  ON  conta.id_lezioni = L.id_lezioni 
+GROUP BY C.nome, C.numero_partecipanti   
+);  
+
+/* DEFINIZIONE FUNZIONI */
+ 
+CREATE OR REPLACE FUNCTION cancella__lezioni() 
+RETURNS trigger 
+language 'plpgsql' AS 
+$$ 
+BEGIN 
+UPDATE corsi SET numero_lezioni = numero_lezioni - 1; 
+RETURN NULL;
+END 
+$$; 
+ 
+ 
+CREATE OR REPLACE Function deleteIfNotExist()  
+returns trigger  
+language 'plpgsql' as $$  
+declare esiste integer; 
+declare id_corso integer; 
+BEGIN  
+    SELECT l.id_corso into id_corso  
+    FROM lezioni as l  
+    WHERE id_lezioni = new.id_lezione;  
+
+    SELECT count(*) into esiste  
+    FROM iscrizione as i   
+    WHERE new.matricola = i.matricola AND id_corso = i.id_corsi; 
+    RAISE NOTICE '% : %', id_corso, esiste; 
+    if(esiste <> 1)then 
+        RAISE EXCEPTION 'Non iscritto al corso'; 
+    end if; 
+    return new; 
+END 
+$$; 
+
+CREATE OR REPLACE FUNCTION aggiungi_presenza() 
+RETURNS trigger 
+language 'plpgsql' as $$ 
+BEGIN 
+    update lezioni 
+    set numero_presenze = numero_presenze + 1  
+    where id_lezioni = new.id_lezione; 
+    return null; 
+END; 
+$$;  
+ 
+
+CREATE OR REPLACE FUNCTION massimo_iscritti_raggiunti() 
+RETURNS trigger 
+language 'plpgsql' AS $$ 
+declare numero_iscritti integer; 
+declare numero_massimo_stud integer; 
+BEGIN 
+SELECT count(*) INTO numero_iscritti FROM iscrizione WHERE id_corsi = NEW.id_corsi; 
+SELECT numero_massimo_studenti INTO numero_massimo_stud FROM corsi WHERE id_corsi = NEW.id_corsi; 
+IF(numero_iscritti + 1 > numero_massimo_stud) THEN 
+RAISE EXCEPTION 'Numero di iscritti massimo raggiunto'; 
+END IF; 
+RETURN new; 
+END 
+$$; 
+ 
+ 
+CREATE OR REPLACE FUNCTION incrementaNumeroLezioni() 
+RETURNS trigger AS 
+$$  
+BEGIN 
+    UPDATE corsi 
+    SET numero_lezioni = numero_lezioni + 1 
+    WHERE NEW.id_corso = id_corsi; 
+    RETURN NULL; 
+END; 
+$$  
+LANGUAGE plpgsql;  
+
+CREATE OR REPLACE FUNCTION incrementaNumeroPartecipanti()  
+RETURNS trigger AS 
+$$ 
+BEGIN 
+    UPDATE corsi 
+    SET numero_partecipanti = numero_partecipanti + 1 
+    WHERE NEW.id_corsi = id_corsi; 
+    RETURN NULL; 
+END; 
+$$ 
+LANGUAGE plpgsql; 
+
+
+/* DEFINIZIONE TRIGGER */ 
+
+CREATE TRIGGER studenti_con_presenze_iscritti_al_corso 
+BEFORE INSERT ON presenza 
+FOR EACH ROW  
+EXECUTE FUNCTION deleteIfNotExist();  
+
+CREATE TRIGGER aggiungi_una_presenza 
+AFTER INSERT on presenza 
+FOR EACH ROW 
+EXECUTE FUNCTION aggiungi_presenza();  
+ 
+CREATE trigger aggiungi_un_partecipante 
+AFTER INSERT on iscrizione  
+FOR EACH ROW 
+EXECUTE FUNCTION incrementaNumeroPartecipanti();  
+ 
+CREATE trigger aggiungi_una_lezione 
+AFTER INSERT on lezioni 
+FOR EACH ROW 
+EXECUTE FUNCTION incrementaNumeroLezioni();  
+
+CREATE trigger cancella_lezioni 
+AFTER DELETE ON lezioni  
+FOR EACH ROW 
+EXECUTE FUNCTION cancella__lezioni();    
+ 
+CREATE TRIGGER massimo_studenti_iscritti 
+BEFORE INSERT ON iscrizione 
+FOR EACH ROW 
+EXECUTE FUNCTION massimo_iscritti_raggiunti();  
